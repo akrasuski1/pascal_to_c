@@ -95,6 +95,7 @@ typedef struct init_info {
 	struct init_info* next;
 } init_info;
 
+#define EMPTY_RECORD 2
 typedef struct recursive_type {
 	int is_record;
 	char* text;
@@ -192,25 +193,29 @@ void print_list(var_entry* n){
 	}
 }
 
+void make_indent(int depth){
+	for(int i = 0; i < depth; i++){ printf("  "); }
+}
+
 void print_type(recursive_type* rt, int depth, int as_c){
 	if(rt->is_record){
-		for(int i = 0; i < depth; i++){ printf("  "); }
+		make_indent(depth);
 		if(as_c){
 			printf("struct\n");
-			for(int i = 0; i < depth; i++){ printf("  "); }
+			make_indent(depth);
 			printf("{\n");
 		}
 		else{
 			printf("record\n");
 		}
-		while(rt){
+		while(rt && rt->is_record != EMPTY_RECORD){
 			print_type(rt->rt, depth+1, as_c);
 			printf(" ");
 			print_list(rt->varnames);
 			printf(";\n");
 			rt = rt->next;
 		}
-		for(int i = 0; i < depth; i++){ printf("  "); }
+		make_indent(depth);
 		if(as_c){
 			printf("}");
 		}
@@ -220,7 +225,7 @@ void print_type(recursive_type* rt, int depth, int as_c){
 	}
 	else{
 		while(rt){
-			for(int i = 0; i < depth; i++){ printf("  "); }
+			make_indent(depth);
 			if(as_c){
 				printf("%s", rt->ti->c_name);
 			}
@@ -232,19 +237,100 @@ void print_type(recursive_type* rt, int depth, int as_c){
 	}
 }
 
+void print_default_initializer(recursive_type* rt){
+	if(rt->is_record){
+		printf("{ }");
+	}
+	else{
+		printf("T0\n");
+	}
+}
+
+void print_init(init_info* info, int depth, recursive_type* reference_struct){
+	int as_c = reference_struct != 0;
+	if(!info){ return; }
+	if(info->base_type == TYPE_RECORD){
+		printf("%s", as_c ? "{ " : "record\n");
+		var_entry* v;
+		if(as_c){
+			v = reference_struct->varnames;
+		}
+		while(info){
+			if(!as_c){
+				make_indent(depth+1);
+				printf("%s : ", info->text);
+			}
+			else{
+				while(!str_equal(v->text, info->text)){
+					print_default_initializer(reference_struct);
+					printf(", ");
+					v = v->next;
+					if(!v){
+						reference_struct = reference_struct->next;
+						if(reference_struct){
+							v = reference_struct->varnames;
+						}
+					}
+				}
+			}
+			print_init(info->ii, depth+1, reference_struct->rt);
+			printf("%s", as_c ? (info->next ? ", " : "") : ";\n");
+			info = info->next;
+			if(v){
+				v = v->next;
+				if(!v){
+					reference_struct = reference_struct->next;
+					if(reference_struct){
+						v = reference_struct->varnames;
+					}
+				}
+			}
+		}
+		printf("%s", as_c ? " }" : "end");
+	}
+	else{
+		printf("%s", as_c ? info->text : literal_names[info->base_type]);
+	}
+}
+
+void incompatible_types(recursive_type* var_type, init_info* init){
+	printf("incompatible types '");
+	print_type(var_type, 0, 0);
+	printf("' and '");
+	print_init(init, 0, 0);
+	printf("' in line %d\n", yylineno);
+	exit(0);
+}
+
 void check_type_compatibility(recursive_type* var_type, init_info* init){
 	if(init){
+		if(var_type->is_record || init->base_type == TYPE_RECORD){
+			if(!var_type->is_record || init->base_type != TYPE_RECORD){
+				incompatible_types(var_type, init);
+			}
+			for(init_info* i = init; i; i = i->next){
+				int found=0;
+				for(recursive_type* v = var_type; v; v = v->next){
+					for(var_entry* n = v->varnames; n; n = n->next){
+						if(str_equal(n->text, i->text)){
+							check_type_compatibility(v->rt, i->ii);
+							found = 1;
+						}
+					}
+				}
+				if(!found){
+					incompatible_types(var_type, init);
+				}
+			}
+			return;
+		}
 		type_info* ti = var_type->ti;
 		int tf = init->base_type;
 		int tt = ti->base_type;
 		if(tf == tt){}
 		else if(tf==TYPE_INT && tt==TYPE_FLT){}
 		else{
-			printf("incompatible types '");
-			print_type(var_type, 0, 0);
-			printf("' and '%s' in line %d\n",
-					literal_names[tf], yylineno);
-			exit(0);
+			incompatible_types(var_type, init);
 		}
 		int violation = 0;
 
@@ -361,7 +447,7 @@ void dispatch_io(char* funname, io_entry* arglist){
 %type <list> IdentifierList
 %type <io> NonEmptyIOFunctionArgs IOFunctionArgs
 %type <pair> OptionalPrecision
-%type <type> Type InsideRecord
+%type <type> Type InsideRecord MaybeEmptyInsideRecord
 %type <init> OptionalInitializer Initializer InitializedVars
 
 %%
@@ -424,15 +510,14 @@ GlobalList2
 Global2
 	: IdentifierList ':' Type OptionalInitializer ';'
 	  { 
-		recursive_type* rt = $3;
-		add_vars($1, rt);
+		add_vars($1, $3);
 		check_type_compatibility($3, $4);
-		print_type(rt, 0, 1);
+		print_type($3, 0, 1);
 		printf(" ");
 		print_list($1);
 		if($4){
 			printf(" = ");
-			printf("%s", $4->text);
+			print_init($4, 0, $3);
 		}
 		printf(";\n");
 	  }
@@ -440,11 +525,16 @@ Global2
 
 Type
 	: IDENT { $$ = make_recursive_type(0, $1, 0, 0); }
-	| KWD_RECORD InsideRecord KWD_END { $$ = $2; }
+	| KWD_RECORD MaybeEmptyInsideRecord KWD_END { $$ = $2; }
+	;
+
+MaybeEmptyInsideRecord
+	: { $$ = make_recursive_type(EMPTY_RECORD, 0, 0, 0); }
+	| InsideRecord { $$ = $1; }
 	;
 
 InsideRecord
-	: { $$ = 0; }
+	: IdentifierList ':' Type ';' { $$ = make_recursive_type(1, $3, 0, $1); }
 	| IdentifierList ':' Type ';' InsideRecord { $$ = make_recursive_type(1, $3, $5, $1); }
 	;
 
@@ -462,7 +552,8 @@ Initializer
 
 InitializedVars
 	: IDENT ':' Initializer { $$ = make_init($1, TYPE_RECORD, $3, 0); }
-	| IDENT ':' Initializer InitializedVars { $$ = make_init($1, TYPE_RECORD, $3, $4); }
+	| IDENT ':' Initializer ';' { $$ = make_init($1, TYPE_RECORD, $3, 0); }
+	| IDENT ':' Initializer ';' InitializedVars { $$ = make_init($1, TYPE_RECORD, $3, $5); }
 	;
 
 Block
