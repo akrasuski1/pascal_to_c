@@ -95,11 +95,19 @@ typedef struct init_info {
 	struct init_info* next;
 } init_info;
 
-#define EMPTY_RECORD 2
+typedef struct recursive_range {
+	struct recursive_range* next;
+	strpair* range;
+} recursive_range;
+
+#define RT_BASIC_TYPE   0
+#define RT_IS_RECORD    1
+#define RT_EMPTY_RECORD 2
 typedef struct recursive_type {
-	int is_record;
+	int rt_type;
 	char* text;
 	var_entry* varnames;
+	recursive_range* range; // For array types.
 	union {
 		type_info* ti;
 		struct recursive_type* rt;
@@ -113,6 +121,13 @@ void print_upper(char* str){
 	while(*str){
 		printf("%c", toupper(*str++));
 	}
+}
+
+recursive_range* make_recursive_range(recursive_range* next, strpair* pair){
+	recursive_range* ret = safe_malloc(sizeof(recursive_range));
+	ret->next = next;
+	ret->range = pair;
+	return ret;
 }
 
 strpair* make_strpair(char* first, char* second){
@@ -168,18 +183,25 @@ type_info* get_type_info(char* type){
 	fail("type identifier expected in line %d\n", yylineno);
 }
 
-recursive_type* make_recursive_type(int is_record, void* text, recursive_type* next, var_entry* varnames){
+recursive_type* make_recursive_type(int rt_type, void* text, recursive_type* next, var_entry* varnames){
 	recursive_type* rt = safe_malloc(sizeof(recursive_type));
-	rt->is_record = is_record;
+	rt->rt_type = rt_type;
 	rt->next = next;
 	rt->varnames = varnames;
-	if(!is_record){
+	rt->range = 0;
+	if(rt_type == RT_BASIC_TYPE){
 		rt->ti = get_type_info(text);
 		rt->text = text;
 	}
 	else{
 		rt->rt = text;
 	}
+	return rt;
+}
+
+recursive_type* copy_recursive_type(recursive_type* orig){
+	recursive_type* rt = safe_malloc(sizeof(recursive_type));
+	memcpy(rt, orig, sizeof(recursive_type));
 	return rt;
 }
 
@@ -197,8 +219,9 @@ void make_indent(int depth){
 	for(int i = 0; i < depth; i++){ printf("  "); }
 }
 
-void print_type(recursive_type* rt, int depth, int as_c){
-	if(rt->is_record){
+void print_type(recursive_type* rt, int depth, int as_c, var_entry* vlist){
+	recursive_type* original_rt = rt;
+	if(rt->rt_type == RT_IS_RECORD || rt->rt_type == RT_EMPTY_RECORD){
 		make_indent(depth);
 		if(as_c){
 			printf("struct\n");
@@ -208,10 +231,8 @@ void print_type(recursive_type* rt, int depth, int as_c){
 		else{
 			printf("record\n");
 		}
-		while(rt && rt->is_record != EMPTY_RECORD){
-			print_type(rt->rt, depth+1, as_c);
-			printf(" ");
-			print_list(rt->varnames);
+		while(rt && rt->rt_type != RT_EMPTY_RECORD){
+			print_type(rt->rt, depth+1, as_c, rt->varnames);
 			printf(";\n");
 			rt = rt->next;
 		}
@@ -223,7 +244,7 @@ void print_type(recursive_type* rt, int depth, int as_c){
 			printf("end");
 		}
 	}
-	else{
+	else if(rt->rt_type == RT_BASIC_TYPE){
 		while(rt){
 			make_indent(depth);
 			if(as_c){
@@ -235,14 +256,23 @@ void print_type(recursive_type* rt, int depth, int as_c){
 			rt = rt->next;
 		}
 	}
+	if(as_c){
+		printf(" ");
+		print_list(vlist);
+		recursive_range* r = original_rt->range;
+		while(r){
+			printf("[%s - (%s) + 1]", r->range->second, r->range->first);
+			r = r->next;
+		}
+	}
 }
 
 void print_default_initializer(recursive_type* rt){
-	if(rt->is_record){
+	if(rt->rt->rt_type != RT_BASIC_TYPE){
 		printf("{ }");
 	}
 	else{
-		printf("T0\n");
+		printf("0.0");
 	}
 }
 
@@ -295,7 +325,7 @@ void print_init(init_info* info, int depth, recursive_type* reference_struct){
 
 void incompatible_types(recursive_type* var_type, init_info* init){
 	printf("incompatible types '");
-	print_type(var_type, 0, 0);
+	print_type(var_type, 0, 0, 0);
 	printf("' and '");
 	print_init(init, 0, 0);
 	printf("' in line %d\n", yylineno);
@@ -304,8 +334,10 @@ void incompatible_types(recursive_type* var_type, init_info* init){
 
 void check_type_compatibility(recursive_type* var_type, init_info* init){
 	if(init){
-		if(var_type->is_record || init->base_type == TYPE_RECORD){
-			if(!var_type->is_record || init->base_type != TYPE_RECORD){
+		if(var_type->rt_type == RT_IS_RECORD || var_type->rt_type == RT_EMPTY_RECORD ||
+				 init->base_type == TYPE_RECORD){
+			if(!(var_type->rt_type == RT_IS_RECORD || var_type->rt_type == RT_EMPTY_RECORD)
+					 || init->base_type != TYPE_RECORD){
 				incompatible_types(var_type, init);
 			}
 			for(init_info* i = init; i; i = i->next){
@@ -382,16 +414,14 @@ enum{
 };
 
 void dispatch_io(char* funname, io_entry* arglist){
-	funname = funname;
 	int fn = -1;
 	if(str_equal(funname, "Read"))   { fn = FN_READ;    }
 	if(str_equal(funname, "Write"))  { fn = FN_WRITE;   }
 	if(str_equal(funname, "WriteLn")){ fn = FN_WRITELN; }
-	free(funname);
 
 	if(fn == -1){ fail("Unknown function!\n"); }
-	if(fn == FN_READ){ printf("  scanf(\""); }
-	if(fn == FN_WRITE || fn == FN_WRITELN){ printf("  printf(\""); }
+	if(fn == FN_READ){ printf("scanf(\""); }
+	if(fn == FN_WRITE || fn == FN_WRITELN){ printf("printf(\""); }
 
 	for(io_entry* io = arglist; io; io = io->next){
 		if(io->type == IO_STR){
@@ -424,11 +454,42 @@ void dispatch_io(char* funname, io_entry* arglist){
 	printf(");\n");
 }
 
+recursive_type* find_var_type(char* name){
+	for(var_entry* v = all_identifiers; v; v = v->next){
+		if(str_equal(v->text, name)){
+			return v->type;
+		}
+	}
+	fail("Identifier %s not found!\n", name);
+}
+
+recursive_type* find_field_type(recursive_type* type, char* name){
+	while(type){
+		for(var_entry* v = type->varnames; v; v = v->next){
+			if(str_equal(v->text, name)){
+				return v->type;
+			}
+		}
+		type = type->next;
+	}
+	fail("Field %s not found!\n", name);
+}
+
+recursive_type* reduce_array(recursive_type* rt){
+	if(rt->range == 0){
+		return rt->rt;
+	}
+	recursive_type* res = copy_recursive_type(rt);
+	res->range = res->range->next;
+	return res;
+}
+
 %}
 
 %union
 {
 	char* text;
+	int ival;
 	struct var_entry* list;
 	struct init_info* init;
 	struct io_entry* io;
@@ -436,18 +497,19 @@ void dispatch_io(char* funname, io_entry* arglist){
 	struct recursive_type* type;
 }
 
-%token KWD_PROGRAM KWD_BEGIN KWD_END KWD_VAR KWD_CONST KWD_RECORD
-%token TOK_ASSIGN
+%token KWD_PROGRAM KWD_BEGIN KWD_END KWD_VAR KWD_CONST KWD_RECORD KWD_ARRAY KWD_OF
+%token TOK_ASSIGN TOK_DOTDOT
 %token TOK_NOT '@' TOK_POW '*' '/' TOK_DIV TOK_MOD TOK_AND
 %token TOK_AS TOK_SHL TOK_SHR  '+' '-' TOK_OR
 %token TOK_XOR TOK_IN TOK_ISS TOK_NEQ '<' '>' TOK_LE TOK_GE
 
-%token <text> IDENT INT_CONST REAL_CONST CHAR_CONST TOK_OP
+%token <text> IDENT INT_CONST REAL_CONST CHAR_CONST TOK_OP 
 
+%type <text> ArrayIndexConst
 %type <list> IdentifierList
 %type <io> NonEmptyIOFunctionArgs IOFunctionArgs
-%type <pair> OptionalPrecision
-%type <type> Type InsideRecord MaybeEmptyInsideRecord
+%type <pair> OptionalPrecision ArrayRange
+%type <type> Type InsideRecord MaybeEmptyInsideRecord Variable ArrayInside NonArrayType
 %type <init> OptionalInitializer Initializer InitializedVars
 
 %%
@@ -512,9 +574,7 @@ Global2
 	  { 
 		add_vars($1, $3);
 		check_type_compatibility($3, $4);
-		print_type($3, 0, 1);
-		printf(" ");
-		print_list($1);
+		print_type($3, 0, 1, $1);
 		if($4){
 			printf(" = ");
 			print_init($4, 0, $3);
@@ -523,19 +583,50 @@ Global2
 	  }
 	;
 
-Type
-	: IDENT { $$ = make_recursive_type(0, $1, 0, 0); }
+NonArrayType
+	: IDENT { $$ = make_recursive_type(RT_BASIC_TYPE, $1, 0, 0); }
 	| KWD_RECORD MaybeEmptyInsideRecord KWD_END { $$ = $2; }
 	;
 
+Type
+	: NonArrayType { $$ = $1; }
+	| ArrayBegin ArrayInside { $$ = $2; } 
+	;
+
+ArrayInside
+	: ArrayRange ArrayEnd NonArrayType 
+	  { $$ = $3; $$->range = make_recursive_range($$->range, $1); }
+	| ArrayRange ',' ArrayInside
+	  { $$ = $3; $$->range = make_recursive_range($$->range, $1); }
+	| ArrayRange ']' KWD_OF KWD_ARRAY '[' ArrayInside
+	  { $$ = $6; $$->range = make_recursive_range($$->range, $1); }
+	;
+
+ArrayRange
+	: ArrayIndexConst TOK_DOTDOT ArrayIndexConst { $$ = make_strpair($1, $3); }
+	;
+
+ArrayIndexConst
+	: INT_CONST { $$ = $1; }
+	| CHAR_CONST { $$ = $1; }
+	;
+
+ArrayBegin
+	: KWD_ARRAY '['
+	;
+
+ArrayEnd
+	: ']' KWD_OF
+	;
+
 MaybeEmptyInsideRecord
-	: { $$ = make_recursive_type(EMPTY_RECORD, 0, 0, 0); }
+	: { $$ = make_recursive_type(RT_EMPTY_RECORD, 0, 0, 0); }
 	| InsideRecord { $$ = $1; }
 	;
 
 InsideRecord
-	: IdentifierList ':' Type ';' { $$ = make_recursive_type(1, $3, 0, $1); }
-	| IdentifierList ':' Type ';' InsideRecord { $$ = make_recursive_type(1, $3, $5, $1); }
+	: IdentifierList ':' Type ';' { $$ = make_recursive_type(RT_IS_RECORD, $3, 0, $1); }
+	| IdentifierList ':' Type ';' InsideRecord { $$ = make_recursive_type(RT_IS_RECORD, $3, $5, $1); }
 	;
 
 OptionalInitializer
@@ -560,10 +651,14 @@ Block
 	: KWD_BEGIN BlockInside KWD_END
 	;
 
+Statement
+	: IOFunction
+	| Assignment
+	;
+
 BlockInside
-	:
-	| IOFunction BlockInside
-	| Assignment BlockInside
+	: { make_indent(1); } Statement BlockInside
+	| 
 	;
 
 IOFunction
@@ -589,15 +684,36 @@ OptionalPrecision
 	;
 
 Assignment
-	: IDENT 
-	  { printf("  "); print_upper($1); printf(" = "); } 
+	: Variable
+	  { printf(" = "); } 
 	  TOK_ASSIGN Expression ';' { printf(";\n"); }
+	;
+
+Variable
+	: IDENT { $$ = find_var_type($1); print_upper($1); }
+	| Variable '.' IDENT { $$ = find_field_type($1, $3); printf("."); print_upper($3); }
+	| Variable '[' { printf("["); $<type>$ = $1; } VariableFinishArrayIndex ']' { printf("]"); $$ = $<type>3; }
+	;
+
+VariableFinishArrayIndex
+	: ExprInVarIndex
+	| ExprInVarIndex ',' { printf("]["); $<type>$ = $<type>0; } VariableFinishArrayIndex
+	;
+
+ExprInVarIndex
+	: Expression
+	  {
+		if(($<type>0)->range == 0){ fail("Not an array!\n"); }
+		printf(" - (%s)", ($<type>0)->range->range->first);
+		$<type>0 = reduce_array($<type>0);
+	  }
 	;
 
 Expression_1
 	: INT_CONST { printf("%s", $1); }
 	| REAL_CONST { printf("%s", $1); }
-	| IDENT { print_upper($1); }
+	| CHAR_CONST { printf("%s", $1); }
+	| Variable
 	| '(' { printf("("); } Expression ')' { printf(")"); }
 	;
 

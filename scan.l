@@ -7,7 +7,7 @@
   enum { BODY_LEVEL, INSIDE_SLC, INSIDE_OSC, INSIDE_NSC } inside_comment = BODY_LEVEL;
   int indent = 2;
 %}
-%s SLC OSC NSC
+%s SLC OSC NSC ARR
 %%
 <INITIAL>[pP][rR][oO][gG][rR][aA][mM]       return KWD_PROGRAM;
 <INITIAL>[bB][eE][gG][iI][nN]               return KWD_BEGIN;
@@ -15,6 +15,7 @@
 <INITIAL>[vV][aA][rR]                       return KWD_VAR;
 <INITIAL>[cC][oO][nN][sS][tT]               return KWD_CONST;
 <INITIAL>[rR][eE][cC][oO][rR][dD]           return KWD_RECORD;
+<INITIAL>[aA][rR][rR][aA][yY]				{ BEGIN ARR; return KWD_ARRAY; }
 
 <INITIAL>\.                                 return '.';
 <INITIAL>\(                                 return '(';
@@ -61,11 +62,11 @@
                                             }
 
 
-<INITIAL>\'[^']+\'                    {
+<INITIAL,ARR>\'[^']+\'                    {
                                               yylval.text = strdup(yytext);
 					      return CHAR_CONST;
 					    }
-<INITIAL>[+-]?[0-9]+                        { 
+<INITIAL,ARR>[+-]?[0-9]+                        { 
                                               yylval.text = strdup(yytext);
 					      return INT_CONST;
 					    }
@@ -73,11 +74,11 @@
                                               yylval.text = strdup(yytext);
 					      return REAL_CONST;
 					    }
-<INITIAL>\[                                 return '[';
-<INITIAL>"(."                               return '[';
+<INITIAL,ARR>\[                                 return '[';
+<INITIAL,ARR>"(."                               return '[';
 
-<INITIAL>\]                                 return ']';
-<INITIAL>".)"                               return ']';
+<INITIAL,ARR>\]                                 return ']';
+<INITIAL,ARR>".)"                               return ']';
 
 <INITIAL>"//"                               { printf("//"); inside_comment = INSIDE_SLC; BEGIN SLC; } /* single line comment */
 <INITIAL>"(*"                               { printf("/*"); inside_comment = INSIDE_OSC; BEGIN OSC; } /* old style comment */
@@ -86,7 +87,7 @@
 <INITIAL>\}                                 { yyerror("\nUnexpected end of comment '}'");  exit(-1); }
 <INITIAL>"*)"                               { yyerror("\nUnexpected end of comment '*)'"); exit(-1); }
 
-<INITIAL>" "|\t|\v|\n              ;
+<INITIAL,ARR>" "|\t|\v|\n              ;
 
 <SLC>\n                            { ECHO; inside_comment = BODY_LEVEL; BEGIN INITIAL; }
 <SLC>"/*"                          printf("/ *");
@@ -104,6 +105,12 @@
 <NSC>"*/"                          printf("* /");
 <NSC>\n                            ECHO;
 <NSC>.                             ECHO;
+
+<ARR>".."           return TOK_DOTDOT;
+<ARR>","            return ',';
+<ARR>[oO][fF]       { BEGIN INITIAL; return KWD_OF; }
+
+
 
 
 %%
