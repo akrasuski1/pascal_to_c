@@ -205,16 +205,6 @@ recursive_type* copy_recursive_type(recursive_type* orig){
 	return rt;
 }
 
-void print_list(var_entry* n){
-	int first = 1;
-	while(n){
-		printf("%s", first ? "" : ", ");
-		print_upper(n->text);
-		first = 0;
-		n = n->next;
-	}
-}
-
 void make_indent(int depth){
 	for(int i = 0; i < depth; i++){ printf("  "); }
 }
@@ -257,12 +247,17 @@ void print_type(recursive_type* rt, int depth, int as_c, var_entry* vlist){
 		}
 	}
 	if(as_c){
-		printf(" ");
-		print_list(vlist);
-		recursive_range* r = original_rt->range;
-		while(r){
-			printf("[%s - (%s) + 1]", r->range->second, r->range->first);
-			r = r->next;
+		int first = 1;
+		while(vlist){
+			printf("%s", first ? " " : ", ");
+			print_upper(vlist->text);
+			first = 0;
+			vlist = vlist->next;
+			recursive_range* r = original_rt->range;
+			while(r){
+				printf("[%s - (%s) + 1]", r->range->second, r->range->first);
+				r = r->next;
+			}
 		}
 	}
 }
@@ -467,7 +462,7 @@ recursive_type* find_field_type(recursive_type* type, char* name){
 	while(type){
 		for(var_entry* v = type->varnames; v; v = v->next){
 			if(str_equal(v->text, name)){
-				return v->type;
+				return type->rt;
 			}
 		}
 		type = type->next;
@@ -596,10 +591,13 @@ Type
 ArrayInside
 	: ArrayRange ArrayEnd NonArrayType 
 	  { $$ = $3; $$->range = make_recursive_range($$->range, $1); }
-	| ArrayRange ',' ArrayInside
+	| ArrayRange ArrayIndexSeparator ArrayInside
 	  { $$ = $3; $$->range = make_recursive_range($$->range, $1); }
-	| ArrayRange ']' KWD_OF KWD_ARRAY '[' ArrayInside
-	  { $$ = $6; $$->range = make_recursive_range($$->range, $1); }
+	;
+
+ArrayIndexSeparator
+	: ','
+	| ']' KWD_OF KWD_ARRAY '['
 	;
 
 ArrayRange
